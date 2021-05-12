@@ -12,9 +12,18 @@ import {
 import {IMarket} from "./interfaces/IMarket.sol";
 // For checking `supportsInterface`.
 import {IERC165} from "@openzeppelin/contracts/introspection/IERC165.sol";
-// For interacting with NFT tokens.
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+// Smaller version of IMedia.
 import {IMediaModified} from "./interfaces/IMediaModified.sol";
+
+interface IERC721Minimal {
+    function transferFrom(
+        address from,
+        address to,
+        uint256 tokenId
+    ) external;
+
+    function ownerOf(uint256 tokenId) external view returns (address owner);
+}
 
 interface IWETH {
     function deposit() external payable;
@@ -22,7 +31,7 @@ interface IWETH {
     function transfer(address to, uint256 value) external returns (bool);
 }
 
-contract ReserveAuctionV3 is ReentrancyGuard {
+contract ReserveAuctionV4 is ReentrancyGuard {
     // Use OpenZeppelin's SafeMath library to prevent overflows.
     using SafeMath for uint256;
 
@@ -39,8 +48,8 @@ contract ReserveAuctionV3 is ReentrancyGuard {
 
     // ============ Immutable Storage ============
 
-    // The address of the ERC721 contract for tokens auctioned via this contract.
-    address public immutable nftContract;
+    // The address of the zNFT contract, so we know when to split fees.
+    address public immutable zoraContract;
     // The address of the WETH contract, so that ETH can be transferred via
     // WETH if native ETH transfers fail.
     address public immutable wethAddress;
@@ -65,11 +74,13 @@ contract ReserveAuctionV3 is ReentrancyGuard {
     bool private _paused;
 
     // A mapping of all of the auctions currently running.
-    mapping(uint256 => Auction) public auctions;
+    mapping(bytes32 => Auction) public auctions;
 
     // ============ Structs ============
 
     struct Auction {
+        address nftContract;
+        uint256 tokenId;
         // The value of the current highest bid.
         uint256 amount;
         // The amount of time that the auction should run for,
@@ -100,13 +111,14 @@ contract ReserveAuctionV3 is ReentrancyGuard {
         uint256 reservePrice,
         uint8 curatorFeePercent,
         address curator,
-        address fundsRecipient
+        address fundsRecipient,
+        bytes32 auctionId
     );
 
     // All of the details of a new bid,
     // with an index created for the tokenId.
     event AuctionBid(
-        uint256 indexed tokenId,
+        bytes32 indexed auctionId,
         address nftContractAddress,
         address sender,
         uint256 value
@@ -115,7 +127,7 @@ contract ReserveAuctionV3 is ReentrancyGuard {
     // All of the details of an auction's cancelation,
     // with an index created for the tokenId.
     event AuctionCanceled(
-        uint256 indexed tokenId,
+        bytes32 indexed auctionId,
         address nftContractAddress,
         address curator
     );
@@ -123,19 +135,18 @@ contract ReserveAuctionV3 is ReentrancyGuard {
     // All of the details of an auction's close,
     // with an index created for the tokenId.
     event AuctionEnded(
-        uint256 indexed tokenId,
+        bytes32 indexed auctionId,
         address nftContractAddress,
         address curator,
         address winner,
         uint256 amount,
-        address nftCreator,
         address payable fundsRecipient
     );
 
     // When the curator recevies fees, emit the details including the amount,
     // with an index created for the tokenId.
     event CuratorFeePercentTransfer(
-        uint256 indexed tokenId,
+        bytes32 indexed auctionId,
         address curator,
         uint256 amount
     );
@@ -160,7 +171,7 @@ contract ReserveAuctionV3 is ReentrancyGuard {
     }
 
     // Reverts if the sender is not the auction's curator.
-    modifier onlyCurator(uint256 tokenId) {
+    modifier onlyCurator(bytes32 tokenId) {
         require(
             auctions[tokenId].curator == msg.sender,
             "Can only be called by auction curator"
@@ -175,26 +186,19 @@ contract ReserveAuctionV3 is ReentrancyGuard {
     }
 
     // Reverts if the auction does not exist.
-    modifier auctionExists(uint256 tokenId) {
+    modifier auctionExists(bytes32 auctionId) {
         // The auction exists if the curator is not null.
-        require(!auctionCuratorIsNull(tokenId), "Auction doesn't exist");
-        _;
-    }
-
-    // Reverts if the auction exists.
-    modifier auctionNonExistant(uint256 tokenId) {
-        // The auction does not exist if the curator is null.
-        require(auctionCuratorIsNull(tokenId), "Auction already exists");
+        require(!auctionCuratorIsNull(auctionId), "Auction doesn't exist");
         _;
     }
 
     // Reverts if the auction is expired.
-    modifier auctionNotExpired(uint256 tokenId) {
+    modifier auctionNotExpired(bytes32 auctionId) {
         require(
             // Auction is not expired if there's never been a bid, or if the
             // current time is less than the time at which the auction ends.
-            auctions[tokenId].firstBidTime == 0 ||
-                block.timestamp < auctionEnds(tokenId),
+            auctions[auctionId].firstBidTime == 0 ||
+                block.timestamp < auctionEnds(auctionId),
             "Auction expired"
         );
         _;
@@ -202,7 +206,7 @@ contract ReserveAuctionV3 is ReentrancyGuard {
 
     // Reverts if the auction is not complete.
     // Auction is complete if there was a bid, and the time has run out.
-    modifier auctionComplete(uint256 tokenId) {
+    modifier auctionComplete(bytes32 tokenId) {
         require(
             // Auction is complete if there has been a bid, and the current time
             // is greater than the auction's end time.
@@ -216,16 +220,16 @@ contract ReserveAuctionV3 is ReentrancyGuard {
     // ============ Constructor ============
 
     constructor(
-        address nftContract_,
+        address zoraContract_,
         address wethAddress_,
         address adminRecoveryAddress_
     ) public {
         require(
-            IERC165(nftContract_).supportsInterface(ERC721_INTERFACE_ID),
-            "Contract at nftContract_ address does not support NFT interface"
+            IERC165(zoraContract_).supportsInterface(ERC721_INTERFACE_ID),
+            "Contract at zoraContract_ address does not support NFT interface"
         );
         // Initialize immutable memory.
-        nftContract = nftContract_;
+        zoraContract = zoraContract_;
         wethAddress = wethAddress_;
         adminRecoveryAddress = adminRecoveryAddress_;
         // Initialize mutable memory.
@@ -241,14 +245,18 @@ contract ReserveAuctionV3 is ReentrancyGuard {
         uint256 reservePrice,
         uint8 curatorFeePercent,
         address curator,
-        address payable fundsRecipient
-    ) external nonReentrant whenNotPaused auctionNonExistant(tokenId) {
+        address payable fundsRecipient,
+        address nftContract
+    ) external nonReentrant whenNotPaused {
+        bytes32 auctionId = getAuctionId(nftContract, tokenId);
+        require(auctionCuratorIsNull(auctionId), "Auction already exists");
         // Check basic input requirements are reasonable.
         require(curator != address(0));
         require(fundsRecipient != address(0));
         require(curatorFeePercent < 100, "Curator fee should be < 100");
         // Initialize the auction details, including null values.
-        auctions[tokenId] = Auction({
+        auctions[auctionId] = Auction({
+            tokenId: tokenId,
             duration: duration,
             reservePrice: reservePrice,
             curatorFeePercent: curatorFeePercent,
@@ -256,11 +264,12 @@ contract ReserveAuctionV3 is ReentrancyGuard {
             fundsRecipient: fundsRecipient,
             amount: 0,
             firstBidTime: 0,
-            bidder: address(0)
+            bidder: address(0),
+            nftContract: nftContract
         });
         // Transfer the NFT into this auction contract, from whoever owns it.
-        IERC721(nftContract).transferFrom(
-            IERC721(nftContract).ownerOf(tokenId),
+        IERC721Minimal(nftContract).transferFrom(
+            IERC721Minimal(nftContract).ownerOf(tokenId),
             address(this),
             tokenId
         );
@@ -272,31 +281,32 @@ contract ReserveAuctionV3 is ReentrancyGuard {
             reservePrice,
             curatorFeePercent,
             curator,
-            fundsRecipient
+            fundsRecipient,
+            auctionId
         );
     }
 
     // ============ Create Bid ============
 
-    function createBid(uint256 tokenId, uint256 amount)
+    function createBid(bytes32 auctionId, uint256 amount)
         external
         payable
         nonReentrant
         whenNotPaused
-        auctionExists(tokenId)
-        auctionNotExpired(tokenId)
+        auctionExists(auctionId)
+        auctionNotExpired(auctionId)
     {
         // Validate that the user's expected bid value matches the ETH deposit.
         require(amount == msg.value, "Amount doesn't equal msg.value");
         require(amount > 0, "Amount must be greater than 0");
         // Check if the current bid amount is 0.
-        if (auctions[tokenId].amount == 0) {
+        if (auctions[auctionId].amount == 0) {
             // If so, it is the first bid.
-            auctions[tokenId].firstBidTime = block.timestamp;
+            auctions[auctionId].firstBidTime = block.timestamp;
             // We only need to check if the bid matches reserve bid for the first bid,
             // since future checks will need to be higher than any previous bid.
             require(
-                amount >= auctions[tokenId].reservePrice,
+                amount >= auctions[auctionId].reservePrice,
                 "Must bid reservePrice or more"
             );
         } else {
@@ -304,9 +314,9 @@ contract ReserveAuctionV3 is ReentrancyGuard {
             // the percentage defined as MIN_BID_INCREMENT_PERCENT.
             require(
                 amount >=
-                    auctions[tokenId].amount.add(
+                    auctions[auctionId].amount.add(
                         // Add 10% of the current bid to the current bid.
-                        auctions[tokenId]
+                        auctions[auctionId]
                             .amount
                             .mul(MIN_BID_INCREMENT_PERCENT)
                             .div(100)
@@ -316,45 +326,61 @@ contract ReserveAuctionV3 is ReentrancyGuard {
 
             // Refund the previous bidder.
             transferETHOrWETH(
-                auctions[tokenId].bidder,
-                auctions[tokenId].amount
+                auctions[auctionId].bidder,
+                auctions[auctionId].amount
             );
         }
         // Update the current auction.
-        auctions[tokenId].amount = amount;
-        auctions[tokenId].bidder = msg.sender;
+        auctions[auctionId].amount = amount;
+        auctions[auctionId].bidder = msg.sender;
         // Compare the auction's end time with the current time plus the 15 minute extension,
         // to see whether we're near the auctions end and should extend the auction.
-        if (auctionEnds(tokenId) < block.timestamp.add(TIME_BUFFER)) {
+        if (auctionEnds(auctionId) < block.timestamp.add(TIME_BUFFER)) {
             // We add onto the duration whenever time increment is required, so
             // that the auctionEnds at the current time plus the buffer.
-            auctions[tokenId].duration += block.timestamp.add(TIME_BUFFER).sub(
-                auctionEnds(tokenId)
-            );
+            auctions[auctionId].duration += block
+                .timestamp
+                .add(TIME_BUFFER)
+                .sub(auctionEnds(auctionId));
         }
         // Emit the event that a bid has been made.
-        emit AuctionBid(tokenId, nftContract, msg.sender, amount);
+        emit AuctionBid(
+            auctionId,
+            auctions[auctionId].nftContract,
+            msg.sender,
+            amount
+        );
+    }
+
+    function getAuctionId(address nftContract, uint256 tokenId)
+        public
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(nftContract, tokenId));
     }
 
     // ============ End Auction ============
 
-    function endAuction(uint256 tokenId)
+    function endAuction(bytes32 auctionId)
         external
         nonReentrant
         whenNotPaused
-        auctionComplete(tokenId)
+        auctionComplete(auctionId)
     {
         // Store relevant auction data in memory for the life of this function.
-        address winner = auctions[tokenId].bidder;
-        uint256 amount = auctions[tokenId].amount;
-        address curator = auctions[tokenId].curator;
-        uint8 curatorFeePercent = auctions[tokenId].curatorFeePercent;
-        address payable fundsRecipient = auctions[tokenId].fundsRecipient;
-        // Remove all auction data for this token from storage.
-        delete auctions[tokenId];
+        address winner = auctions[auctionId].bidder;
+        uint256 amount = auctions[auctionId].amount;
+        address curator = auctions[auctionId].curator;
+        uint8 curatorFeePercent = auctions[auctionId].curatorFeePercent;
+        address payable fundsRecipient = auctions[auctionId].fundsRecipient;
         // We don't use safeTransferFrom, to prevent reverts at this point,
         // which would break the auction.
-        IERC721(nftContract).transferFrom(address(this), winner, tokenId);
+        IERC721Minimal(auctions[auctionId].nftContract).transferFrom(
+            address(this),
+            winner,
+            auctions[auctionId].tokenId
+        );
         // First handle the curator's fee.
         if (curatorFeePercent > 0) {
             // Determine the curator amount, which is some percent of the total.
@@ -365,71 +391,89 @@ contract ReserveAuctionV3 is ReentrancyGuard {
             // to send to the funds recipient and original NFT creator.
             amount = amount.sub(curatorAmount);
             // Emit the details of the transfer as an event.
-            emit CuratorFeePercentTransfer(tokenId, curator, curatorAmount);
+            emit CuratorFeePercentTransfer(auctionId, curator, curatorAmount);
         }
-        // Get the address of the original creator, so that we can split shares
-        // if appropriate.
-        address payable nftCreator =
-            payable(
-                address(IMediaModified(nftContract).tokenCreators(tokenId))
-            );
-        // If the creator and the recipient of the funds are the same
-        // (and we expect this to be common), we can just do one transaction.
-        if (nftCreator == fundsRecipient) {
-            transferETHOrWETH(nftCreator, amount);
-        } else {
-            // Otherwise, we should determine the percent that goes to the creator.
-            // Collect share data from Zora.
-            uint256 creatorAmount =
-                // Call the splitShare function on the market contract, which
-                // takes in a Decimal and an amount.
-                IMarket(IMediaModified(nftContract).marketContract())
-                    .splitShare(
-                    // Fetch the decimal from the BidShares data on the market.
-                    IMarket(IMediaModified(nftContract).marketContract())
-                        .bidSharesForToken(tokenId)
-                        .creator,
-                    // Specify the amount.
-                    amount
+
+        if (auctions[auctionId].nftContract == zoraContract) {
+            // Get the address of the original creator, so that we can split shares
+            // if appropriate.
+            address payable nftCreator =
+                payable(
+                    address(
+                        IMediaModified(zoraContract).tokenCreators(
+                            auctions[auctionId].tokenId
+                        )
+                    )
                 );
-            // Send the creator's share to the creator.
-            transferETHOrWETH(nftCreator, creatorAmount);
-            // Send the remainder of the amount to the funds recipient.
-            transferETHOrWETH(fundsRecipient, amount.sub(creatorAmount));
+            // If the creator and the recipient of the funds are the same
+            // (and we expect this to be common), we can just do one transaction.
+            if (nftCreator == fundsRecipient) {
+                transferETHOrWETH(nftCreator, amount);
+            } else {
+                // Otherwise, we should determine the percent that goes to the creator.
+                // Collect share data from Zora.
+                uint256 creatorAmount =
+                    // Call the splitShare function on the market contract, which
+                    // takes in a Decimal and an amount.
+                    IMarket(IMediaModified(zoraContract).marketContract())
+                        .splitShare(
+                        // Fetch the decimal from the BidShares data on the market.
+                        IMarket(IMediaModified(zoraContract).marketContract())
+                            .bidSharesForToken(auctions[auctionId].tokenId)
+                            .creator,
+                        // Specify the amount.
+                        amount
+                    );
+                // Send the creator's share to the creator.
+                transferETHOrWETH(nftCreator, creatorAmount);
+                // Send the remainder of the amount to the funds recipient.
+                transferETHOrWETH(fundsRecipient, amount.sub(creatorAmount));
+            }
         }
+
         // Emit an event describing the end of the auction.
         emit AuctionEnded(
-            tokenId,
-            nftContract,
+            auctionId,
+            auctions[auctionId].nftContract,
             curator,
             winner,
             amount,
-            nftCreator,
             fundsRecipient
         );
+
+        // Remove all auction data for this token from storage.
+        delete auctions[auctionId];
     }
 
     // ============ Cancel Auction ============
 
-    function cancelAuction(uint256 tokenId)
+    function cancelAuction(bytes32 auctionId)
         external
         nonReentrant
-        auctionExists(tokenId)
-        onlyCurator(tokenId)
+        auctionExists(auctionId)
+        onlyCurator(auctionId)
     {
         // Check that there hasn't already been a bid for this NFT.
         require(
-            uint256(auctions[tokenId].firstBidTime) == 0,
+            uint256(auctions[auctionId].firstBidTime) == 0,
             "Auction already started"
         );
         // Pull the creator address before removing the auction.
-        address curator = auctions[tokenId].curator;
-        // Remove all data about the auction.
-        delete auctions[tokenId];
+        address curator = auctions[auctionId].curator;
         // Transfer the NFT back to the curator.
-        IERC721(nftContract).transferFrom(address(this), curator, tokenId);
+        IERC721Minimal(auctions[auctionId].nftContract).transferFrom(
+            address(this),
+            curator,
+            auctions[auctionId].tokenId
+        );
         // Emit an event describing that the auction has been canceled.
-        emit AuctionCanceled(tokenId, nftContract, curator);
+        emit AuctionCanceled(
+            auctionId,
+            auctions[auctionId].nftContract,
+            curator
+        );
+        // Remove all data about the auction.
+        delete auctions[auctionId];
     }
 
     // ============ Admin Functions ============
@@ -451,14 +495,14 @@ contract ReserveAuctionV3 is ReentrancyGuard {
 
     // Allows the admin to transfer any NFT from this contract
     // to the recovery address.
-    function recoverNFT(uint256 tokenId) external onlyAdminRecovery {
-        IERC721(nftContract).transferFrom(
+    function recoverNFT(bytes32 auctionId) external onlyAdminRecovery {
+        IERC721Minimal(auctions[auctionId].nftContract).transferFrom(
             // From the auction contract.
             address(this),
             // To the recovery account.
             adminRecoveryAddress,
             // For the specified token.
-            tokenId
+            auctions[auctionId].tokenId
         );
     }
 
@@ -520,16 +564,21 @@ contract ReserveAuctionV3 is ReentrancyGuard {
     }
 
     // Returns true if the auction's curator is set to the null address.
-    function auctionCuratorIsNull(uint256 tokenId) private view returns (bool) {
+    function auctionCuratorIsNull(bytes32 auctionId)
+        private
+        view
+        returns (bool)
+    {
         // The auction does not exist if the curator is the null address,
         // since the NFT would not have been transferred in `createAuction`.
-        return auctions[tokenId].curator == address(0);
+        return auctions[auctionId].curator == address(0);
     }
 
     // Returns the timestamp at which an auction will finish.
-    function auctionEnds(uint256 tokenId) private view returns (uint256) {
+    function auctionEnds(bytes32 auctionId) private view returns (uint256) {
         // Derived by adding the auction's duration to the time of the first bid.
         // NOTE: duration can be extended conditionally after each new bid is added.
-        return auctions[tokenId].firstBidTime.add(auctions[tokenId].duration);
+        return
+            auctions[auctionId].firstBidTime.add(auctions[auctionId].duration);
     }
 }

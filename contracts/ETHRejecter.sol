@@ -2,17 +2,17 @@
 pragma solidity 0.6.8;
 
 interface IAuctionModified {
-    function createBid(uint256 tokenId, uint256 amount) external payable;
+    function createBid(bytes32 auctionId, uint256 amount) external payable;
 }
 
 contract ETHRejecter {
     // Allows the contract to place a bid.
     function relayBid(
         address auction,
-        uint256 tokenId,
+        bytes32 auctionId,
         uint256 amount
     ) external payable {
-        IAuctionModified(auction).createBid{value: amount}(tokenId, amount);
+        IAuctionModified(auction).createBid{value: amount}(auctionId, amount);
     }
 
     receive() external payable {
