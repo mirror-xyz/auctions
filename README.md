@@ -1,6 +1,6 @@
 # NFT Reserve Auctions
 
-The main contract is at https://github.com/mirror-xyz/reserve-auction-v2/blob/main/contracts/ReserveAuctionV2.sol
+The main contract is at https://github.com/mirror-xyz/reserve-auction-v2/blob/main/contracts/ReserveAuctionV3.sol
 
 Please send feedback to g@mirror.xyz
 

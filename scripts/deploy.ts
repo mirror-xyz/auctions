@@ -1,7 +1,7 @@
 import fs from 'fs-extra';
 import { JsonRpcProvider } from '@ethersproject/providers';
 import { Wallet } from '@ethersproject/wallet';
-import { ReserveAuctionV2Factory } from '../typechain/ReserveAuctionV2Factory';
+import { ReserveAuctionV3Factory } from '../typechain/ReserveAuctionV3Factory';
 
 const CHAIN_ID = 4;
 
@@ -44,8 +44,8 @@ async function start() {
   // console.log('NFTFactory deployed at ', deployTx.address);
   // addressBook.NFTFactory = deployTx.address;
 
-  console.log('Deploying ReserveAuctionV2...');
-  const reserveAuctionDeployTx = await new ReserveAuctionV2Factory(wallet).deploy(
+  console.log('Deploying ReserveAuctionV3...');
+  const reserveAuctionDeployTx = await new ReserveAuctionV3Factory(wallet).deploy(
     ZORA_MEDIA_CONTRACT_ADDRESS,
     wethAddress,
     adminRecoveryAddress
