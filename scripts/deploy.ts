@@ -2,7 +2,6 @@ import fs from 'fs-extra';
 import { JsonRpcProvider } from '@ethersproject/providers';
 import { Wallet } from '@ethersproject/wallet';
 import { ReserveAuctionV3Factory } from '../typechain/ReserveAuctionV3Factory';
-import { NftFactoryV3Factory } from '../typechain/NftFactoryV3Factory';
 import { BigNumber } from '@ethersproject/bignumber';
 
 let CHAIN_ID;
