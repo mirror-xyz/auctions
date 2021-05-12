@@ -1,9 +1,12 @@
 import fs from 'fs-extra';
 import { JsonRpcProvider } from '@ethersproject/providers';
 import { Wallet } from '@ethersproject/wallet';
-import { ReserveAuctionV2Factory } from '../typechain/ReserveAuctionV2Factory';
+import { ReserveAuctionV3Factory } from '../typechain/ReserveAuctionV3Factory';
+import { NftFactoryV3Factory } from '../typechain/NftFactoryV3Factory';
+import { BigNumber } from '@ethersproject/bignumber';
 
-const CHAIN_ID = 4;
+let CHAIN_ID;
+CHAIN_ID = 1;
 
 async function start() {
   //   const args = require('minimist')(process.argv.slice(2));
@@ -22,33 +25,44 @@ async function start() {
   // @ts-ignore
   const addressBook = JSON.parse(await fs.readFileSync(sharedAddressPath));
 
-  const ZORA_MEDIA_CONTRACT_ADDRESS = addressBook.media
+  const ZORA_MEDIA_CONTRACT_ADDRESS = addressBook.media;
 
   let wethAddress;
   let adminRecoveryAddress;
 
   if (CHAIN_ID === 4) {
-    wethAddress = "0xc778417e063141139fce010982780140aa0cd5ab";
-    adminRecoveryAddress = "0xCC65fA278B917042822538c44ba10AD646824026";
+    wethAddress = '0xc778417e063141139fce010982780140aa0cd5ab';
+    adminRecoveryAddress = '0xCC65fA278B917042822538c44ba10AD646824026';
   } else if (CHAIN_ID === 1) {
-    wethAddress = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
-    adminRecoveryAddress = "";
+    wethAddress = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
+    adminRecoveryAddress = '0x2330ee705fFD040bB0cbA8CB7734Dfe00E7C4b57';
   }
 
+  // console.log({
+  //   ZORA_MEDIA_CONTRACT_ADDRESS,
+  //   wethAddress,
+  //   adminRecoveryAddress,
+  //   e: process.env.RPC_ENDPOINT,
+  //   p: process.env.PRIVATE_KEY
+  // });
+
   // console.log('Deploying NFTFactory...');
-  // const deployTx = await new NftFactoryFactory(wallet).deploy(
+  // const deployTx = await new NftFactoryV3Factory(wallet).deploy(
   //   ZORA_MEDIA_CONTRACT_ADDRESS
   // );
   // console.log('Deploy TX: ', deployTx.deployTransaction.hash);
   // await deployTx.deployed();
-  // console.log('NFTFactory deployed at ', deployTx.address);
-  // addressBook.NFTFactory = deployTx.address;
+  // console.log('NFTFactoryV3 deployed at ', deployTx.address);
+  // addressBook.NFTFactoryV3 = deployTx.address;
 
-  console.log('Deploying ReserveAuctionV2...');
-  const reserveAuctionDeployTx = await new ReserveAuctionV2Factory(wallet).deploy(
+  console.log('Deploying ReserveAuctionV3...');
+  const reserveAuctionDeployTx = await new ReserveAuctionV3Factory(wallet).deploy(
     ZORA_MEDIA_CONTRACT_ADDRESS,
     wethAddress,
-    adminRecoveryAddress
+    adminRecoveryAddress,
+    {
+      gasPrice: BigNumber.from("150000000000")
+    }
   );
   console.log(`Deploy TX: ${reserveAuctionDeployTx.deployTransaction.hash}`);
   await reserveAuctionDeployTx.deployed();
